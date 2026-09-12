@@ -102,48 +102,47 @@ app.post("/v1/images/generations", async (req,res)=>{
     const model = req.body.model || "@cf/black-forest-labs/flux-2-klein-4b";
     const prompt = req.body.prompt;
     const size = (req.body.size || "1024x512").split("x");
-    const width = parseInt(size[0],10) || 1024;
-    const height = parseInt(size[1],10) || 512;
+    const width = String(parseInt(size[0],10) || 1024);
+    const height = String(parseInt(size[1],10) || 512);
     const isEdit =!!req.body.image;
 
-    let cfUrl, cfRes;
+    // 文生圖和圖生圖，flux-2 都要走 multipart，所以兩個都用同一個 /ai/run/
+    const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
+
+    const form = new FormData();
+    form.append("prompt", prompt);
+    form.append("width", width);
+    form.append("height", height);
+    form.append("num_steps", String(req.body.steps || 20));
+    form.append("guidance", String(req.body.guidance || 7.5));
+    if(req.body.seed) form.append("seed", String(req.body.seed));
+    if(req.body.negative_prompt) form.append("negative_prompt", req.body.negative_prompt);
 
     if(isEdit){
-      // 圖生圖：照你說的，用 /v1/images/edits + multipart
-      cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/v1/images/edits`;
+      // 圖生圖再多加 image + strength
       const b64 = req.body.image.includes(",")? req.body.image.split(",")[1] : req.body.image;
       const buffer = Buffer.from(b64, "base64");
-      const form = new FormData();
-      form.append("model", model);
-      form.append("prompt", prompt);
       form.append("image", new Blob([buffer],{type:"image/png"}), "input.png");
       form.append("strength", String(req.body.strength || 0.8));
-      cfRes = await fetch(cfUrl, { method:"POST", headers:{ Authorization:`Bearer ${CF_TOKEN}` }, body: form });
+      console.log("IMG2IMG multipart:", model);
     } else {
-      // 單純文生圖：改回舊版 /ai/run/，這個 100% 有 route，不會 700
-      cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
-      const payload = {
-        prompt, width, height,
-        num_steps: req.body.steps || 20,
-        guidance: req.body.guidance || 7.5,
-        seed: req.body.seed? Number(req.body.seed) : undefined
-      };
-      console.log("TEXT2IMG via /ai/run/:", model);
-      cfRes = await fetch(cfUrl, {
-        method:"POST",
-        headers:{ Authorization:`Bearer ${CF_TOKEN}`, "Content-Type":"application/json" },
-        body: JSON.stringify(payload)
-      });
+      console.log("TEXT2IMG multipart:", model);
     }
+
+    const cfRes = await fetch(cfUrl, {
+      method:"POST",
+      headers:{ Authorization:`Bearer ${CF_TOKEN}` }, // 不要加 Content-Type，讓 fetch 自己帶 boundary
+      body: form
+    });
 
     if(!cfRes.ok){
       const t = await cfRes.text();
-      console.error("CF IMAGE ERROR:", t);
+      console.error("CF IMAGE ERROR V14:", t);
       return res.status(429).json({ error:{ message:"AiError: "+t }});
     }
 
     const data = await cfRes.json();
-    const b64_out = data.result?.image || data.data?.[0]?.b64_json || data.result;
+    const b64_out = data.result?.image || data.result;
     res.json({ created:Date.now(), data:[{ b64_json: b64_out }] });
 
   }catch(e){
