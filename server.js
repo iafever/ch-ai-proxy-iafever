@@ -105,25 +105,29 @@ app.post("/v1/images/generations", async (req,res)=>{
     const width = parseInt(size[0],10) || 1024;
     const height = parseInt(size[1],10) || 512;
 
-    const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
+    // 判斷是文生圖還是圖生圖
+    const isEdit =!!req.body.image;
+
+    const cfUrl = isEdit
+     ? `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/v1/images/edits`
+      : `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/v1/images/generations`;
 
     let cfRes;
 
-    if(req.body.image){
-      // --- 圖生圖：用 multipart ---
+    if(isEdit){
+      // --- 圖生圖：必須用 /edits + multipart ---
       const b64 = req.body.image.includes(",")? req.body.image.split(",")[1] : req.body.image;
       const buffer = Buffer.from(b64, "base64");
       const blob = new Blob([buffer], { type: "image/png" });
 
       const form = new FormData();
+      form.append("model", model);
       form.append("prompt", prompt);
       form.append("image", blob, "input.png");
+      form.append("strength", String(req.body.strength || 0.8));
       form.append("width", String(width));
       form.append("height", String(height));
       form.append("num_steps", String(req.body.steps || 30));
-      form.append("guidance", String(req.body.guidance || 7.5));
-      form.append("strength", String(req.body.strength || 0.8));
-      if(req.body.seed) form.append("seed", String(req.body.seed));
 
       cfRes = await fetch(cfUrl, {
         method:"POST",
@@ -131,13 +135,14 @@ app.post("/v1/images/generations", async (req,res)=>{
         body: form
       });
     } else {
-      // --- 文生圖：用 JSON ---
+      // --- 單純文生圖：用 /generations + JSON，最穩 ---
       const payload = {
-        prompt, width, height,
+        model, prompt, width, height,
         num_steps: req.body.steps || 20,
         guidance: req.body.guidance || 7.5,
         seed: req.body.seed? Number(req.body.seed) : undefined
       };
+
       cfRes = await fetch(cfUrl, {
         method:"POST",
         headers:{ Authorization:`Bearer ${CF_TOKEN}`, "Content-Type":"application/json" },
@@ -152,8 +157,8 @@ app.post("/v1/images/generations", async (req,res)=>{
     }
 
     const data = await cfRes.json();
-    // flux 有時候回 ReadableStream，有時候回 image
-    const b64_out = data.result?.image || data.result;
+    const b64_out = data.data?.[0]?.b64_json || data.result?.image || data.data?.[0]?.url;
+
     res.json({ created:Date.now(), data:[{ b64_json: b64_out }] });
 
   }catch(e){
