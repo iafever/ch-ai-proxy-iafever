@@ -28,6 +28,7 @@ app.get("/v1/models", (req,res)=>{
   res.json({ object:"list", data:[
       { id: "@cf/meta/llama-3.1-8b-instruct-fast", object: "model", owned_by: "meta" },
       { id: "@cf/ibm-granite/granite-4.0-h-micro", object: "model", owned_by: "ibm" },
+      {id:"@cf/black-forest-labs/flux-1-schnell", object:"model", owned_by:"black-forest"},
       { id: "@cf/black-forest-labs/flux-2-klein-4b", object: "model", owned_by: "black-forest" }
   ]});
 });
