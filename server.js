@@ -102,9 +102,9 @@ async function handleImage(req, res) {
   try {
     const model = "@cf/black-forest-labs/flux-2-klein-4b";
     const prompt = String(req.body.prompt || "full body photo of the same person, same face");
-    const size = (req.body.size || "1024x1024").split("x");
-    const width = String(parseInt(size[0]) || 1024);
-    const height = String(parseInt(size[1]) || 1024);
+    const size = (req.body.size || "910x512").split("x");
+    const width = String(parseInt(size[0]) || 910);
+    const height = String(parseInt(size[1]) || 512);
     const imgInput = req.body.image || req.body.image_b64;
 
     const form = new FormData();
