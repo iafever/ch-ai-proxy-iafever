@@ -100,43 +100,41 @@ app.post("/v1/chat/completions", async (req,res)=>{
 
 async function handleImage(req, res) {
   try {
-    const model = req.body.model || "@cf/black-forest-labs/flux-1-schnell";
-    const prompt = req.body.prompt || "";
-    const size = (req.body.size || "1024x512").split("x");
+    const model = "@cf/black-forest-labs/flux-2-klein-4b"; // 鎖便宜這顆
+    const prompt = req.body.prompt || "photo";
+    const size = (req.body.size || "1024x1024").split("x");
     const width = parseInt(size[0]) || 1024;
-    const height = parseInt(size[1]) || 512;
+    const height = parseInt(size[1]) || 1024;
     const imgInput = req.body.image || req.body.image_b64;
 
+    // flux-2-klein-4b 官方正確參數，照這個才不會 5006
     const payload = {
-      prompt: prompt,
+      prompt: String(prompt),
       width: width,
       height: height,
-      num_steps: model.includes("schnell")? 8 : 20,
-      guidance: 7.5,
+      steps: 8, // klein 只要 8 步就好，最便宜最快
     };
 
     if (imgInput) {
       const b64 = typeof imgInput === "string" && imgInput.includes(",")? imgInput.split(",")[1] : imgInput;
-      payload.image = b64; // 全部改用純 b64，JSON 傳
-      payload.strength = parseFloat(req.body.strength || 0.5);
-      console.log("IMG2IMG ACTIVE, strength:", payload.strength, "img_len:", b64.length);
+      payload.image = b64;
+      payload.strength = parseFloat(req.body.strength || 0.5); // 大頭照轉全身就用 0.5
+      console.log("KLEIN IMG2IMG strength", payload.strength);
     } else {
-      console.log("TEXT2IMG ACTIVE");
+      console.log("KLEIN TEXT2IMG");
     }
 
     const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
     const cfRes = await fetch(cfUrl, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${CF_TOKEN}`, "Content-Type": "application/json" },
+      method:"POST",
+      headers:{ Authorization:`Bearer ${CF_TOKEN}`, "Content-Type":"application/json" },
       body: JSON.stringify(payload)
     });
 
     const text = await cfRes.text();
-    if (!cfRes.ok) { console.error("CF ERROR:", text); return res.status(cfRes.status).json({ error:{message:text} }); }
-
+    if (!cfRes.ok) { console.error("CF KLEIN ERROR:", text); return res.status(cfRes.status).json({ error:{message:text} }); }
     const data = JSON.parse(text);
-    const b64_out = data.result?.image || data.result;
-    res.json({ created: Date.now(), data: [{ b64_json: b64_out }] });
+    res.json({ created: Date.now(), data:[{ b64_json: data.result?.image || data.result }] });
 
   } catch (e) { console.error(e); res.status(500).json({error:{message:e.message}}); }
 }
