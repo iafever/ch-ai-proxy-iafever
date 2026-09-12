@@ -100,42 +100,54 @@ app.post("/v1/chat/completions", async (req,res)=>{
 
 async function handleImage(req, res) {
   try {
-    const model = req.body.model || "@cf/black-forest-labs/flux-2-klein-4b";
+    const model = req.body.model || "@cf/black-forest-labs/flux-1-schnell";
     const prompt = req.body.prompt || "";
     const size = (req.body.size || "1024x512").split("x");
-    const width = String(parseInt(size[0]) || 1024);
-    const height = String(parseInt(size[1]) || 512);
-
-    const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
-    const form = new FormData();
-    form.append("prompt", prompt);
-    form.append("width", width);
-    form.append("height", height);
-    form.append("num_steps", String(req.body.steps || 20));
-    form.append("guidance", String(req.body.guidance || 7.5));
-    if (req.body.seed) form.append("seed", String(req.body.seed));
-
-    // 只有真的有圖才處理圖生圖，避免 undefined.includes
+    const width = parseInt(size[0]) || 1024;
+    const height = parseInt(size[1]) || 512;
     const imgInput = req.body.image || req.body.image_b64;
-    if (imgInput) {
-      const b64 = typeof imgInput === "string" && imgInput.includes(",")? imgInput.split(",")[1] : imgInput;
-      if (b64) {
+
+    console.log(`MODEL: ${model}, HAS_IMAGE: ${!!imgInput}, PROMPT: ${prompt.substring(0,50)}`);
+
+    let cfUrl, cfOptions;
+
+    if (model.includes("stable-diffusion")) {
+      // SDXL 用 JSON 傳，圖生圖最穩，不會出貓
+      cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
+      const payload = { prompt, width, height, num_steps: 30, guidance: 7.5 };
+      if (imgInput) {
+        const b64 = imgInput.includes(",")? imgInput.split(",")[1] : imgInput;
+        payload.image = b64; // SDXL 要純 b64
+        payload.strength = parseFloat(req.body.strength || 0.5);
+      }
+      cfOptions = { method:"POST", headers:{ Authorization:`Bearer ${CF_TOKEN}`, "Content-Type":"application/json" }, body: JSON.stringify(payload) };
+    } else {
+      // FLUX 用 multipart
+      cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
+      const form = new FormData();
+      form.append("prompt", prompt);
+      form.append("width", String(width));
+      form.append("height", String(height));
+      form.append("num_steps", String(req.body.steps || 8));
+      if (imgInput) {
+        const b64 = imgInput.includes(",")? imgInput.split(",")[1] : imgInput;
         const buffer = Buffer.from(b64, "base64");
-        form.append("image", new Blob([buffer], { type: "image/png" }), "input.png");
+        console.log("IMAGE BUFFER SIZE:", buffer.length);
+        form.append("image", new Blob([buffer], {type:"image/jpeg"}), "input.jpg");
         form.append("strength", String(req.body.strength || 0.5));
       }
+      cfOptions = { method:"POST", headers:{ Authorization:`Bearer ${CF_TOKEN}` }, body: form };
     }
 
-    const cfRes = await fetch(cfUrl, { method: "POST", headers: { Authorization: `Bearer ${CF_TOKEN}` }, body: form });
-    if (!cfRes.ok) { const t = await cfRes.text(); console.error(t); return res.status(429).json({ error: { message: "AiError: " + t } }); }
+    const cfRes = await fetch(cfUrl, cfOptions);
+    const text = await cfRes.text();
+    if (!cfRes.ok) { console.error("CF ERROR:", text); return res.status(429).json({ error:{message:text} }); }
 
-    const data = await cfRes.json();
+    const data = JSON.parse(text);
     const b64_out = data.result?.image || data.result;
-    res.json({ created: Date.now(), data: [{ b64_json: b64_out }] });
-  } catch (e) {
-    console.error("IMAGE HANDLE ERROR:", e);
-    res.status(500).json({ error: { message: e.message } });
-  }
+    res.json({ created:Date.now(), data:[{ b64_json: b64_out }] });
+
+  } catch (e) { console.error(e); res.status(500).json({error:{message:e.message}}); }
 }
 
 app.post("/v1/images/generations", handleImage);
