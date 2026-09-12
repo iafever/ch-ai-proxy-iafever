@@ -121,7 +121,7 @@ async function handleImage(req, res) {
       if (b64) {
         const buffer = Buffer.from(b64, "base64");
         form.append("image", new Blob([buffer], { type: "image/png" }), "input.png");
-        form.append("strength", String(req.body.strength || 0.8));
+        form.append("strength", String(req.body.strength || 0.5));
       }
     }
 
