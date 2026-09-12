@@ -104,45 +104,31 @@ app.post("/v1/images/generations", async (req,res)=>{
     const size = (req.body.size || "1024x512").split("x");
     const width = parseInt(size[0],10) || 1024;
     const height = parseInt(size[1],10) || 512;
-
-    // 判斷是文生圖還是圖生圖
     const isEdit =!!req.body.image;
 
-    const cfUrl = isEdit
-     ? `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/v1/images/edits`
-      : `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/v1/images/generations`;
-
-    let cfRes;
+    let cfUrl, cfRes;
 
     if(isEdit){
-      // --- 圖生圖：必須用 /edits + multipart ---
+      // 圖生圖：照你說的，用 /v1/images/edits + multipart
+      cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/v1/images/edits`;
       const b64 = req.body.image.includes(",")? req.body.image.split(",")[1] : req.body.image;
       const buffer = Buffer.from(b64, "base64");
-      const blob = new Blob([buffer], { type: "image/png" });
-
       const form = new FormData();
       form.append("model", model);
       form.append("prompt", prompt);
-      form.append("image", blob, "input.png");
+      form.append("image", new Blob([buffer],{type:"image/png"}), "input.png");
       form.append("strength", String(req.body.strength || 0.8));
-      form.append("width", String(width));
-      form.append("height", String(height));
-      form.append("num_steps", String(req.body.steps || 30));
-
-      cfRes = await fetch(cfUrl, {
-        method:"POST",
-        headers:{ Authorization:`Bearer ${CF_TOKEN}` },
-        body: form
-      });
+      cfRes = await fetch(cfUrl, { method:"POST", headers:{ Authorization:`Bearer ${CF_TOKEN}` }, body: form });
     } else {
-      // --- 單純文生圖：用 /generations + JSON，最穩 ---
+      // 單純文生圖：改回舊版 /ai/run/，這個 100% 有 route，不會 700
+      cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
       const payload = {
-        model, prompt, width, height,
+        prompt, width, height,
         num_steps: req.body.steps || 20,
         guidance: req.body.guidance || 7.5,
         seed: req.body.seed? Number(req.body.seed) : undefined
       };
-
+      console.log("TEXT2IMG via /ai/run/:", model);
       cfRes = await fetch(cfUrl, {
         method:"POST",
         headers:{ Authorization:`Bearer ${CF_TOKEN}`, "Content-Type":"application/json" },
@@ -157,8 +143,7 @@ app.post("/v1/images/generations", async (req,res)=>{
     }
 
     const data = await cfRes.json();
-    const b64_out = data.data?.[0]?.b64_json || data.result?.image || data.data?.[0]?.url;
-
+    const b64_out = data.result?.image || data.data?.[0]?.b64_json || data.result;
     res.json({ created:Date.now(), data:[{ b64_json: b64_out }] });
 
   }catch(e){
