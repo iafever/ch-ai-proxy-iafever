@@ -100,36 +100,39 @@ app.post("/v1/chat/completions", async (req,res)=>{
 
 async function handleImage(req, res) {
   try {
-    const model = "@cf/black-forest-labs/flux-2-klein-4b"; // 鎖便宜這顆
-    const prompt = req.body.prompt || "photo";
+    const model = "@cf/black-forest-labs/flux-2-klein-4b";
+    const prompt = String(req.body.prompt || "photo");
     const size = (req.body.size || "1024x1024").split("x");
-    const width = parseInt(size[0]) || 1024;
-    const height = parseInt(size[1]) || 1024;
+    const width = String(parseInt(size[0]) || 1024);
+    const height = String(parseInt(size[1]) || 1024);
     const imgInput = req.body.image || req.body.image_b64;
 
-    // flux-2-klein-4b 官方正確參數，照這個才不會 5006
-    const payload = {
-      prompt: String(prompt),
-      width: width,
-      height: height,
-      steps: 8, // klein 只要 8 步就好，最便宜最快
-    };
+    const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
+    let cfRes;
 
     if (imgInput) {
-      const b64 = typeof imgInput === "string" && imgInput.includes(",")? imgInput.split(",")[1] : imgInput;
-      payload.image = b64;
-      payload.strength = parseFloat(req.body.strength || 0.5); // 大頭照轉全身就用 0.5
-      console.log("KLEIN IMG2IMG strength", payload.strength);
-    } else {
-      console.log("KLEIN TEXT2IMG");
-    }
+      // 有圖 = 圖生圖 = 必須用 multipart，不然 5006
+      const b64 = imgInput.includes(",")? imgInput.split(",")[1] : imgInput;
+      const buffer = Buffer.from(b64, "base64");
+      const form = new FormData();
+      form.append("prompt", prompt);
+      form.append("width", width);
+      form.append("height", height);
+      form.append("steps", "8");
+      form.append("strength", String(req.body.strength || 0.5));
+      form.append("image", new Blob([buffer], {type:"image/jpeg"}), "input.jpg");
 
-    const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
-    const cfRes = await fetch(cfUrl, {
-      method:"POST",
-      headers:{ Authorization:`Bearer ${CF_TOKEN}`, "Content-Type":"application/json" },
-      body: JSON.stringify(payload)
-    });
+      console.log("KLEIN MULTIPART IMG2IMG");
+      cfRes = await fetch(cfUrl, { method:"POST", headers:{ Authorization:`Bearer ${CF_TOKEN}` }, body: form });
+    } else {
+      // 沒圖 = 文生圖 = 用 json
+      console.log("KLEIN JSON TEXT2IMG");
+      cfRes = await fetch(cfUrl, {
+        method:"POST",
+        headers:{ Authorization:`Bearer ${CF_TOKEN}`, "Content-Type":"application/json" },
+        body: JSON.stringify({ prompt, width: parseInt(width), height: parseInt(height), steps: 8 })
+      });
+    }
 
     const text = await cfRes.text();
     if (!cfRes.ok) { console.error("CF KLEIN ERROR:", text); return res.status(cfRes.status).json({ error:{message:text} }); }
