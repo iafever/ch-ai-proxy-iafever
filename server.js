@@ -101,44 +101,62 @@ app.post("/v1/chat/completions", async (req,res)=>{
 async function handleImage(req, res) {
   try {
     const model = "@cf/black-forest-labs/flux-2-klein-4b";
-    const prompt = String(req.body.prompt || "full body photo of the same person, same face");
+    const prompt = String(req.body.prompt || "photo of the person");
     const size = (req.body.size || "910x512").split("x");
     const width = String(parseInt(size[0]) || 910);
     const height = String(parseInt(size[1]) || 512);
-    const imgInput = req.body.image || req.body.image_b64;
 
     const form = new FormData();
     form.append("prompt", prompt);
     form.append("width", width);
     form.append("height", height);
-    form.append("steps", "8");
 
-    if (imgInput) {
-      const b64 = String(imgInput).includes(",")? String(imgInput).split(",")[1] : String(imgInput);
-      const buffer = Buffer.from(b64, "base64");
-      // 關鍵：檔名要是 input.jpg，type 要 image/jpeg
-      form.append("image", new Blob([buffer], {type:"image/jpeg"}), "input.jpg");
-      form.append("strength", String(req.body.strength || 0.22));
-      console.log("KLEIN IMG2IMG MULTIPART, size", buffer.length);
-    } else {
-      console.log("KLEIN TEXT2IMG MULTIPART");
+    // 支援接收單張 Base64 字串，或是多張 Base64 的陣列
+    let images = req.body.image || req.body.image_b64 || [];
+    if (!Array.isArray(images) && typeof images === "string") {
+      images = [images]; // 如果只有單張，包裝成陣列處理
     }
 
-    const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
+    // 限制最多處理 4 張圖
+    const uploadImages = images.slice(0, 4);
+
+    uploadImages.forEach((imgInput, index) => {
+      if (imgInput) {
+        const b64 = String(imgInput).includes(",") ? String(imgInput).split(",")[1] : String(imgInput);
+        const buffer = Buffer.from(b64, "base64");
+        const file = new File([buffer], `input_${index}.jpg`, { type: "image/jpeg" });
+        
+        // 關鍵：Cloudflare 規格必須是 input_image_0, input_image_1...
+        form.append(`input_image_${index}`, file); 
+        console.log(`Loaded input_image_${index}, size:`, buffer.length);
+      }
+    });
+
+    if (uploadImages.length > 0) {
+      form.append("strength", String(req.body.strength || 0.22));
+    }
+
+    const cfUrl = `https://cloudflare.com{CF_ACCOUNT}/ai/run/${model}`;
     const cfRes = await fetch(cfUrl, {
       method: "POST",
-      headers: { Authorization: `Bearer ${CF_TOKEN}` }, // multipart 不要自己加 Content-Type
+      headers: { Authorization: `Bearer ${CF_TOKEN}` },
       body: form
     });
 
     const text = await cfRes.text();
-    console.log("CF STATUS", cfRes.status);
-    if (!cfRes.ok) { console.error("CF KLEIN ERROR:", text); return res.status(cfRes.status).json({ error:{message:text} }); }
+    if (!cfRes.ok) { 
+      console.error("CF ERROR:", text); 
+      return res.status(cfRes.status).json({ error: { message: text } }); 
+    }
 
     const data = JSON.parse(text);
-    res.json({ created: Date.now(), data:[{ b64_json: data.result?.image || data.result }] });
+    const outputImage = data.result?.image || data.result;
+    res.json({ created: Date.now(), data: [{ b64_json: outputImage }] });
 
-  } catch (e) { console.error("FINAL ERROR", e); res.status(500).json({error:{message:e.message}}); }
+  } catch (e) { 
+    console.error("FINAL ERROR", e); 
+    res.status(500).json({ error: { message: e.message } }); 
+  }
 }
 
 app.post("/v1/images/generations", handleImage);
