@@ -101,39 +101,37 @@ app.post("/v1/chat/completions", async (req,res)=>{
 async function handleImage(req, res) {
   try {
     const model = "@cf/black-forest-labs/flux-2-klein-4b";
-    const prompt = String(req.body.prompt || "photo of the person");
-    const size = (req.body.size || "910x512").split("x");
-    const width = String(parseInt(size[0]) || 910);
-    const height = String(parseInt(size[1]) || 512);
+    
+    // 強制在提示詞加上主體定錨（防變性變形）
+    const userPrompt = req.body.prompt || "a woman changing clothes";
+    const prompt = `A beautiful woman, keeping the identical face and hair style from input_image_0, ${userPrompt}`;
+    
+    const size = (req.body.size || "1024x1024").split("x"); // FLUX 輸出支援大圖
+    const width = String(parseInt(size[0]) || 1024);
+    const height = String(parseInt(size[1]) || 1024);
+    const imgInput = req.body.image || req.body.image_b64;
 
     const form = new FormData();
     form.append("prompt", prompt);
     form.append("width", width);
     form.append("height", height);
+    
+    // ⚠️ 注意：不要加 steps=8，Cloudflare Klein 模型固定為 4 步
 
-    // 支援接收單張 Base64 字串，或是多張 Base64 的陣列
-    let images = req.body.image || req.body.image_b64 || [];
-    if (!Array.isArray(images) && typeof images === "string") {
-      images = [images]; // 如果只有單張，包裝成陣列處理
-    }
-
-    // 限制最多處理 4 張圖
-    const uploadImages = images.slice(0, 4);
-
-    uploadImages.forEach((imgInput, index) => {
-      if (imgInput) {
-        const b64 = String(imgInput).includes(",") ? String(imgInput).split(",")[1] : String(imgInput);
-        const buffer = Buffer.from(b64, "base64");
-        const file = new File([buffer], `input_${index}.jpg`, { type: "image/jpeg" });
-        
-        // 關鍵：Cloudflare 規格必須是 input_image_0, input_image_1...
-        form.append(`input_image_${index}`, file); 
-        console.log(`Loaded input_image_${index}, size:`, buffer.length);
-      }
-    });
-
-    if (uploadImages.length > 0) {
-      form.append("strength", String(req.body.strength || 0.22));
+    if (imgInput) {
+      const b64 = String(imgInput).includes(",") ? String(imgInput).split(",")[1] : String(imgInput);
+      const buffer = Buffer.from(b64, "base64");
+      
+      const file = new File([buffer], "input.jpg", { type: "image/jpeg" });
+      form.append("input_image_0", file); // 修正 1：確定為 input_image_0
+      
+      // 修正 2：換衣服背景強度要高，預設給 0.755
+      const strengthValue = String(req.body.strength || 0.75);
+      form.append("strength", strengthValue);
+      
+      console.log(`[Proxy] Multi-Ref Image Sent. Size: ${buffer.length} bytes, Strength: ${strengthValue}`);
+    } else {
+      console.log("[Proxy] Pure Text-to-Image Generation");
     }
 
     const cfUrl = `https://cloudflare.com{CF_ACCOUNT}/ai/run/${model}`;
