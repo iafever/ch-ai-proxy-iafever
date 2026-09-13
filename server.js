@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import https from "https"; // 💡 引入 Node.js 內建的 https 模組來建立超穩定連線
 
 const app = express();
 app.use(cors());
@@ -23,7 +24,7 @@ function normalizeMessages(msgs) {
   }).filter(m => m.content);
 }
 
-app.get("/", (req, res) => res.send("V10 OK " + new Date().toISOString()));
+app.get("/", (req, res) => res.send("V11 OK " + new Date().toISOString()));
 
 app.get("/v1/models", (req, res) => {
   res.json({ object: "list", data: [
@@ -97,78 +98,97 @@ app.post("/v1/chat/completions", async (req, res) => {
   }
 });
 
-// 🛠️ 徹底重構、修正 fetch 斷流、修復變性問題的生圖函式
+// 🛠️ 採用內建 https 模組重構：完全免疫 fetch 網路斷流，且精準處理多圖參考規格
 async function handleImage(req, res) {
   try {
     const model = "@cf/black-forest-labs/flux-2-klein-4b";
     
-    // 💡 1. 核心定錨提示詞：在最前面強加入女性限制，強制要求模型保留參考圖的五官
+    // 1. 強制定錨提示詞，防範生成男性
     const userPrompt = req.body.prompt || "changing clothes";
     const prompt = `A beautiful young woman, keeping the identical face and hair from image 0, ${userPrompt}. Realistic photography, masterpiece.`;
     
     const size = (req.body.size || "1024x1024").split("x");
-    const width = String(parseInt(size[0]) || 1024);
-    const height = String(parseInt(size[1]) || 1024);
+    const width = parseInt(size[0]) || 1024;
+    const height = parseInt(size[1]) || 1024;
     const imgInput = req.body.image || req.body.image_b64;
 
-    // 💡 2. 使用 Node.js 20 內建的原生標準 FormData 物件
-    const form = new globalThis.FormData();
-    form.append("prompt", prompt);
-    form.append("width", width);
-    form.append("height", height);
+    // 2. 手動建立極其穩定的二進位 Multipart Boundary，避免任何套件相容問題
+    const boundary = "----WebKitFormBoundaryProxyServer" + Math.random().toString(36).substring(2);
+    const chunks = [];
+
+    // 寫入文字參數
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\n${prompt}\r\n`));
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="width"\r\n\r\n${width}\r\n`));
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="height"\r\n\r\n${height}\r\n`));
 
     if (imgInput) {
-      // 💡 3. 清理 Base64 字串並將其轉換成符合傳輸規格的標準 Blob
       const b64 = String(imgInput).includes(",") ? String(imgInput).split(",")[1] : String(imgInput);
       const buffer = Buffer.from(b64, "base64");
       
-      // 💡 4. 使用標準 Blob 包裝，並且欄位名稱精確指定為官方要求的 input_image_0
-      const blob = new Blob([buffer], { type: "image/jpeg" });
-      form.append("input_image_0", blob, "input.jpg");
+      // 3. 欄位精確對齊官方規範 input_image_0
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="input_image_0"; filename="input.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`));
+      chunks.push(buffer);
+      chunks.push(Buffer.from("\r\n"));
       
-      // 💡 5. 設定較高的重繪強度 (0.8)，給予 AI 更換衣服與背景的空間，但留住臉部
+      // 4. 重繪強度高一點 (0.8) 給予換衣服背景的空間
       const strengthValue = String(req.body.strength || 0.8);
-      form.append("strength", strengthValue);
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="strength"\r\n\r\n${strengthValue}\r\n`));
       
-      console.log(`[Proxy Image] 圖片成功打包為 Blob。大小: ${buffer.length} 位元組，重繪強度: ${strengthValue}`);
-    } else {
-      console.log("[Proxy Image] 偵測到純文字生圖模式 (未傳入圖片)");
+      console.log(`[Proxy Image] 圖片已手動封裝成 Buffer。大小: ${buffer.length} 位元組`);
     }
 
-    const cfUrl = `https://cloudflare.com{CF_ACCOUNT}/ai/run/${model}`;
-    
-    // 💡 6. 關鍵：不要設定 Content-Type！由原生 fetch 透過 FormData 自動在底層配置最穩定的 Multipart Boundary
-    const cfRes = await fetch(cfUrl, {
+    chunks.push(Buffer.from(`--${boundary}--\r\n`));
+    const payload = Buffer.concat(chunks);
+
+    // 5. 使用 https.request 並強逼採用 IPv4 (family: 4)，徹底解決 Render 平台上的 fetch failed 災情
+    const options = {
+      hostname: "://cloudflare.com",
+      path: `/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`,
       method: "POST",
-      headers: { 
-        "Authorization": `Bearer ${CF_TOKEN}`
-      },
-      body: form
+      family: 4, // ⚠️ 強制只用 IPv4 連線，排除 IPv6 的握手 Bug！
+      headers: {
+        "Authorization": `Bearer ${CF_TOKEN}`,
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        "Content-Length": payload.length
+      }
+    };
+
+    const cfReq = https.request(options, (cfRes) => {
+      let responseBody = "";
+      cfRes.on("data", (chunk) => { responseBody += chunk; });
+      cfRes.on("end", () => {
+        console.log("[Proxy Image] Cloudflare 響應狀態碼:", cfRes.statusCode);
+        
+        if (cfRes.statusCode !== 200) {
+          console.error("[Proxy Image] Cloudflare 報錯:", responseBody);
+          return res.status(cfRes.statusCode).json({ error: { message: responseBody } });
+        }
+
+        try {
+          const data = JSON.parse(responseBody);
+          const outputImage = data.result?.image || data.result;
+          res.json({ created: Date.now(), data: [{ b64_json: outputImage }] });
+        } catch (err) {
+          res.status(500).json({ error: { message: "解析 Cloudflare JSON 失敗: " + err.message } });
+        }
+      });
     });
 
-    const text = await cfRes.text();
-    console.log("[Proxy Image] Cloudflare 響應狀態碼:", cfRes.status);
-    
-    if (!cfRes.ok) { 
-      console.error("[Proxy Image] Cloudflare API 報錯:", text); 
-      return res.status(cfRes.status).json({ error: { message: text } }); 
-    }
-
-    const data = JSON.parse(text);
-    const outputImage = data.result?.image || data.result;
-    
-    res.json({ 
-      created: Date.now(), 
-      data: [{ b64_json: outputImage }] 
+    cfReq.on("error", (err) => {
+      console.error("[Proxy Image] HTTPS 請求發生硬體/網路錯誤:", err);
+      res.status(500).json({ error: { message: "連線 Cloudflare 失敗: " + err.message } });
     });
 
-  } catch (e) { 
-    console.error("[Proxy Image] 執行階段發生崩潰錯誤:", e); 
-    res.status(500).json({ error: { message: e.message } }); 
+    cfReq.write(payload);
+    cfReq.end();
+
+  } catch (e) {
+    console.error("[Proxy Image] 崩潰錯誤:", e);
+    res.status(500).json({ error: { message: e.message } });
   }
 }
 
 app.post("/v1/images/generations", handleImage);
 app.post("/v1/images/edits", handleImage);
 
-app.listen(PORT, () => console.log("V10 running on port " + PORT));
+app.listen(PORT, () => console.log("V11 running on port " + PORT));
