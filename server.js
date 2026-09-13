@@ -118,7 +118,7 @@ async function handleImage(req, res) {
       const buffer = Buffer.from(b64, "base64");
       // 關鍵：檔名要是 input.jpg，type 要 image/jpeg
       form.append("image", new Blob([buffer], {type:"image/jpeg"}), "input.jpg");
-      form.append("strength", String(req.body.strength || 0.5));
+      form.append("strength", String(req.body.strength || 0.22));
       console.log("KLEIN IMG2IMG MULTIPART, size", buffer.length);
     } else {
       console.log("KLEIN TEXT2IMG MULTIPART");
