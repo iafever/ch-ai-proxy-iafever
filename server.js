@@ -30,19 +30,24 @@ async function handleImage(req, res) {
     const height = parseInt(size[1])||1024;
     
     // 雙吃：JSON 的 image_b64 或 multipart 的 file
+        // 雙吃 + 萬用：JSON 或 multipart 任何欄位都抓
     let b64 = null;
-    if (req.file) {
+    if (req.files && req.files.length > 0) {
+      // multipart 來的，抓第一張圖
+      const file = req.files[0];
+      b64 = file.buffer.toString("base64");
+      console.log("MULTIPART image received", file.fieldname, file.size);
+    } else if (req.file) {
       b64 = req.file.buffer.toString("base64");
-      console.log("MULTIPART image received", req.file.size);
+      console.log("MULTIPART single image", req.file.size);
     } else {
-      const imgInput = req.body.image || req.body.image_b64;
-      if (imgInput) b64 = String(imgInput).split(",").pop();
+      const imgInput = req.body.image || req.body.image_b64 || req.body.file;
+      if (imgInput) {
+        b64 = String(imgInput).split(",").pop();
+        console.log("JSON image received");
+      }
     }
-
-    if (b64 && !prompt.toLowerCase().match(/woman|man|female|male/)) {
-      prompt = `same woman, identical face, face unchanged, female, ${prompt}`;
-    }
-
+    
     const payload = { prompt, width, height, num_steps: 8, guidance: 3.5 };
     if (b64) {
       payload.image = b64;
@@ -74,9 +79,12 @@ async function handleChat(req, res) {
 }
 
 // 重點：edits 必須用 upload.single("image") 接 multipart
+// 萬用接法：不管 Cherry 送 image / image[] / file 都吃
+const multipartHandler = upload.any();
+
 app.post("/v1/images/generations", handleImage);
-app.post("/v1/images/edits", upload.single("image"), handleImage);
-app.post("/v1/images/variations", upload.single("image"), handleImage);
+app.post("/v1/images/edits", multipartHandler, handleImage);
+app.post("/v1/images/variations", multipartHandler, handleImage);
 app.post("/v1/chat/completions", handleChat);
 
 const PORT = process.env.PORT || 10000;
