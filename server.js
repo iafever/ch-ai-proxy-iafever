@@ -42,20 +42,20 @@ app.get("/v1/models", (req,res)=>{
 async function handleImage(req, res) {
   try {
     let prompt = String(req.body.prompt || "photo");
-    const size = (req.body.size || "1024x1024").split("x");
-    const width = parseInt(size[0])||1024;
-    const height = parseInt(size[1])||1024;
+    const size = (req.body.size || "910x512").split("x");
+    const width = parseInt(size[0])||910;
+    const height = parseInt(size[1])||512;
     const imgInput = req.body.image || req.body.image_b64;
 
     if (imgInput && !prompt.toLowerCase().match(/woman|man|female|male/)) {
-      prompt = `same woman, identical face, face unchanged, female, ${prompt}`;
+      prompt = `identical face, face unchanged, ${prompt}`;
     }
 
     const payload = {
       prompt: prompt,
       width: width,
       height: height,
-      num_steps: 8,
+      num_steps: 4,
       guidance: 3.5,
     };
 
@@ -124,6 +124,8 @@ async function handleChat(req, res) {
 }
 
 app.post("/v1/images/generations", handleImage);
+app.post("/v1/images/edits", handleImage); // Cherry 圖生圖走這個
+app.post("/v1/images/variations", handleImage);
 app.post("/v1/chat/completions", handleChat);
 
 const PORT = process.env.PORT || 10000;
