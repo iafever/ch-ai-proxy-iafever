@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import FormData from "form-data";
 
 const app = express();
 app.use(cors());
@@ -102,57 +103,75 @@ async function handleImage(req, res) {
   try {
     const model = "@cf/black-forest-labs/flux-2-klein-4b";
     
-    // 強制在提示詞加上主體定錨（防變性變形）
-    const userPrompt = req.body.prompt || "a woman changing clothes";
-    const prompt = `A beautiful woman, keeping the identical face and hair style from input_image_0, ${userPrompt}`;
+    // 1. 核心心法：在 Prompt 裡強制「鎖定性別」並告訴模型參考第 0 張圖，防止其隨機生成男性
+    const userPrompt = req.body.prompt || "changing clothes";
+    const prompt = `A beautiful young woman, keeping the identical face and hair from image 0, ${userPrompt}. Realistic photography, masterpiece.`;
     
-    const size = (req.body.size || "1024x1024").split("x"); // FLUX 輸出支援大圖
-    const width = String(parseInt(size[0]) || 1024);
-    const height = String(parseInt(size[1]) || 1024);
+    const size = (req.body.size || "1024x1024").split("x");
+    const width = parseInt(size[0]) || 1024;
+    const height = parseInt(size[1]) || 1024;
     const imgInput = req.body.image || req.body.image_b64;
 
+    // 2. 使用穩定的外部 form-data 庫，不要用 Node 原生不成熟的 FormData
     const form = new FormData();
     form.append("prompt", prompt);
-    form.append("width", width);
-    form.append("height", height);
+    form.append("width", String(width));
+    form.append("height", String(height));
     
-    // ⚠️ 注意：不要加 steps=8，Cloudflare Klein 模型固定為 4 步
+    // 💡 提示：Cloudflare Klein 4B 模型在 REST API 的 steps 參數是固定的，所以此處不手動帶入 steps 欄位
 
     if (imgInput) {
+      // 3. 乾淨切除 Base64 的開頭 Data URI 宣告
       const b64 = String(imgInput).includes(",") ? String(imgInput).split(",")[1] : String(imgInput);
       const buffer = Buffer.from(b64, "base64");
       
-      const file = new File([buffer], "input.jpg", { type: "image/jpeg" });
-      form.append("input_image_0", file); // 修正 1：確定為 input_image_0
+      // 4. 關鍵規格修正：欄位名稱必須是 input_image_0 (不可為 image)
+      // 使用 form-data 庫的 .append(key, buffer, options) 形式，能完美生成符合 HTTP 規範的二進位欄位
+      form.append("input_image_0", buffer, {
+        filename: "input.jpg",
+        contentType: "image/jpeg"
+      });
       
-      // 修正 2：換衣服背景強度要高，預設給 0.755
-      const strengthValue = String(req.body.strength || 0.25);
+      // 5. 提高重繪強度 (預設給 0.8)，給予 AI 足夠空間擦除舊衣服/背景，同時依賴 image 0 抓回臉部
+      const strengthValue = String(req.body.strength || 0.8);
       form.append("strength", strengthValue);
       
-      console.log(`[Proxy] Multi-Ref Image Sent. Size: ${buffer.length} bytes, Strength: ${strengthValue}`);
+      console.log(`[Proxy Image] 成功封裝圖片. 大小: ${buffer.length} bytes, 強度: ${strengthValue}`);
     } else {
-      console.log("[Proxy] Pure Text-to-Image Generation");
+      console.log("[Proxy Image] 純文字生圖模式 (未偵測到輸入圖片)");
     }
 
     const cfUrl = `https://cloudflare.com{CF_ACCOUNT}/ai/run/${model}`;
+    
+    // 6. 關鍵 headers 發送：必須帶入 form.getHeaders() 以取得正確的 boundary，千萬不能手動寫死 Content-Type
     const cfRes = await fetch(cfUrl, {
       method: "POST",
-      headers: { Authorization: `Bearer ${CF_TOKEN}` },
+      headers: {
+        Authorization: `Bearer ${CF_TOKEN}`,
+        ...form.getHeaders() 
+      },
       body: form
     });
 
     const text = await cfRes.text();
+    console.log("[Proxy Image] Cloudflare 回傳狀態碼:", cfRes.status);
+    
     if (!cfRes.ok) { 
-      console.error("CF ERROR:", text); 
+      console.error("[Proxy Image] Cloudflare 報錯訊息:", text); 
       return res.status(cfRes.status).json({ error: { message: text } }); 
     }
 
     const data = JSON.parse(text);
+    
+    // 7. 支援相容性輸出
     const outputImage = data.result?.image || data.result;
-    res.json({ created: Date.now(), data: [{ b64_json: outputImage }] });
+    res.json({ 
+      created: Date.now(), 
+      data: [{ b64_json: outputImage }] 
+    });
 
   } catch (e) { 
-    console.error("FINAL ERROR", e); 
+    console.error("[Proxy Image] 發生異常錯誤:", e); 
     res.status(500).json({ error: { message: e.message } }); 
   }
 }
