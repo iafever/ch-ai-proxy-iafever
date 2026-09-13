@@ -126,7 +126,7 @@ async function handleImage(req, res) {
       form.append("input_image_0", file); // 修正 1：確定為 input_image_0
       
       // 修正 2：換衣服背景強度要高，預設給 0.755
-      const strengthValue = String(req.body.strength || 0.75);
+      const strengthValue = String(req.body.strength || 0.25);
       form.append("strength", strengthValue);
       
       console.log(`[Proxy] Multi-Ref Image Sent. Size: ${buffer.length} bytes, Strength: ${strengthValue}`);
