@@ -30,68 +30,6 @@ app.get("/v1/models", (req, res) => res.json({
   ]
 }));
 
-// --- 手寫 multipart 解析，不用 multer ---
-function parseMultipart(req) {
-  return new Promise((resolve) => {
-    const ct = req.headers["content-type"] || "";
-    if (!ct.includes("multipart/form-data")) {
-      resolve({ fields: req.body, fileB64: null });
-      return;
-    }
-    const boundary = ct.split("boundary=")[1];
-    if (!boundary) {
-      resolve({ fields: req.body, fileB64: null });
-      return;
-    }
-    let chunks = [];
-    req.on("data", c => chunks.push(c));
-    req.on("end", () => {
-      try {
-        const buffer = Buffer.concat(chunks);
-        const text = buffer.toString("latin1");
-        const parts = text.split("--" + boundary);
-        let fields = {};
-        let fileB64 = null;
-
-        for (let part of parts) {
-          if (part.includes('name="prompt"')) {
-            const m = part.split("\r\n\r\n");
-            if (m[1]) fields.prompt = m[1].split("\r\n--")[0].trim();
-          }
-          if (part.includes('name="size"')) {
-            const m = part.split("\r\n\r\n");
-            if (m[1]) fields.size = m[1].split("\r\n--")[0].trim();
-          }
-          if (part.includes('name="strength"')) {
-            const m = part.split("\r\n\r\n");
-            if (m[1]) fields.strength = m[1].split("\r\n--")[0].trim();
-          }
-          // 抓圖，不管欄位叫 image 還是 image[]
-          if (part.includes('filename="')) {
-            const headerEnd = buffer.indexOf("\r\n\r\n", buffer.indexOf(part.slice(0,200), 0, "latin1"));
-            // 用 binary 切法找檔案內容
-            const partStart = text.indexOf(part);
-            // 這個 part 在 buffer 的位置
-            const partBuffer = Buffer.from(part, "latin1");
-            // 真正的檔案二進位
-            let fileStart = part.indexOf("\r\n\r\n") + 4;
-            let fileEnd = part.lastIndexOf("\r\n");
-            let fileContent = part.slice(fileStart, fileEnd);
-            // latin1 -> buffer -> base64
-            if (fileContent.length > 100) {
-              fileB64 = Buffer.from(fileContent, "latin1").toString("base64");
-            }
-          }
-        }
-        resolve({ fields, fileB64 });
-      } catch (e) {
-        console.error("parseMultipart error", e);
-        resolve({ fields: req.body, fileB64: null });
-      }
-    });
-  });
-}
-
 app.post("/v1/chat/completions", async (req, res) => {
   try {
     let model = String(req.body.model || MODELS.QWEN);
@@ -169,55 +107,50 @@ app.post("/v1/chat/completions", async (req, res) => {
   }
 });
 
-// --- IMAGE：入口吃 multipart(自己解析)，出口用 JSON 給 CF ---
 async function handleImage(req, res) {
   try {
-    const { fields, fileB64 } = await parseMultipart(req);
-    const body = {...req.body,...fields };
+    const model = "@cf/black-forest-labs/flux-2-klein-4b";
+    const prompt = String(req.body.prompt || "full body photo of the same person, same face");
+    const size = (req.body.size || "910x512").split("x");
+    const width = String(parseInt(size[0]) || 910);
+    const height = String(parseInt(size[1]) || 512);
+    const imgInput = req.body.image || req.body.image_b64;
 
-    let b64 = fileB64;
-    if (!b64) {
-      const imgInput = body.image || body.image_b64 || req.body.image || req.body.image_b64;
-      if (imgInput) b64 = String(imgInput).split(",").pop();
+    const form = new FormData();
+    form.append("prompt", prompt);
+    form.append("width", width);
+    form.append("height", height);
+    form.append("steps", "4");
+
+    if (imgInput) {
+      const b64 = String(imgInput).includes(",")? String(imgInput).split(",")[1] : String(imgInput);
+      const buffer = Buffer.from(b64, "base64");
+      // 關鍵：檔名要是 input.jpg，type 要 image/jpeg
+      form.append("image", new Blob([buffer], {type:"image/jpeg"}), "input.jpg");
+      form.append("strength", String(req.body.strength || 0.5));
+      console.log("KLEIN IMG2IMG MULTIPART, size", buffer.length);
+    } else {
+      console.log("KLEIN TEXT2IMG MULTIPART");
     }
 
-    let prompt = String(body.prompt || req.body.prompt || "photo");
-    if (b64 &&!/woman|man|female|male|person/i.test(prompt)) {
-      prompt = `same woman, identical face, face unchanged, female, ${prompt}`;
-    }
-
-    const size = (body.size || req.body.size || "1024x1024").split("x");
-    const payload = {
-      prompt,
-      width: parseInt(size[0]) || 1024,
-      height: parseInt(size[1]) || 1024,
-      num_steps: 8,
-      guidance: 3.5
-    };
-    if (b64) {
-      payload.image = b64;
-      payload.strength = parseFloat(body.strength || req.body.strength || 0.22);
-      console.log(`IMG2IMG no-multer b64 len=${b64.length} strength=${payload.strength}`);
-    }
-
-    const cfRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${MODELS.IMAGE}`, {
+    const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
+    const cfRes = await fetch(cfUrl, {
       method: "POST",
-      headers: { Authorization: `Bearer ${CF_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      headers: { Authorization: `Bearer ${CF_TOKEN}` }, // multipart 不要自己加 Content-Type
+      body: form
     });
-    const txt = await cfRes.text();
-    if (!cfRes.ok) return res.status(500).json({ error: { message: txt } });
-    const d = JSON.parse(txt);
-    res.json({ created: Date.now(), data: [{ b64_json: d.result?.image || d.result }] });
-  } catch (e) {
-    console.error("IMAGE ERROR", e);
-    res.status(500).json({ error: { message: e.message } });
-  }
+
+    const text = await cfRes.text();
+    console.log("CF STATUS", cfRes.status);
+    if (!cfRes.ok) { console.error("CF KLEIN ERROR:", text); return res.status(cfRes.status).json({ error:{message:text} }); }
+
+    const data = JSON.parse(text);
+    res.json({ created: Date.now(), data:[{ b64_json: data.result?.image || data.result }] });
+
+  } catch (e) { console.error("FINAL ERROR", e); res.status(500).json({error:{message:e.message}}); }
 }
 
-// 注意：這裡不用任何 middleware，直接讓 handleImage 自己收 raw body
-app.post("/v1/images/generations", (req, res) => { req.headers["content-type"]?.includes("multipart")? handleImage(req,res) : handleImage(req,res); });
+app.post("/v1/images/generations", handleImage);
 app.post("/v1/images/edits", handleImage);
-app.post("/v1/images/variations", handleImage);
 
-app.listen(PORT, () => console.log(`V13 no-multer running ${PORT}`));
+app.listen(PORT,()=>console.log("V9 running "+PORT));
