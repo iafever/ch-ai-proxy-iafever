@@ -97,27 +97,25 @@ function parseMultipart(req) {
 app.post("/v1/chat/completions", async (req, res) => {
   try {
     let model = String(req.body.model || MODELS.LLAMA);
-    if (model.includes("fast") || model.includes("granite-4.0")) {
-      model = model.includes("granite")? MODELS.GRANITE : MODELS.LLAMA;
-    }
+    if (model.includes("fast")) model = MODELS.LLAMA;
+    if (model.includes("ibm/granite")) model = MODELS.GRANITE;
+    if (!model.includes("llama") && !model.includes("granite")) model = MODELS.LLAMA;
     const messages = (req.body.messages || []).map(m => {
       let c = m.content;
-      if (Array.isArray(c)) c = c.map(x => typeof x === "string"? x : (x.text || x.content || "")).join("\n");
+      if (Array.isArray(c)) c = c.map(x => typeof x === "string" ? x : (x.text || x.content || "")).join("\n");
       return { role: m.role || "user", content: String(c || "") };
     }).filter(m => m.content);
-
     const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/v1/chat/completions`;
     const cfRes = await fetch(cfUrl, {
       method: "POST",
       headers: { Authorization: `Bearer ${CF_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, stream:!!req.body.stream })
+      body: JSON.stringify({ model, messages, stream: !!req.body.stream })
     });
-
     if (!cfRes.ok) {
       const t = await cfRes.text();
+      console.error("CF ERROR", t);
       return res.status(cfRes.status).json({ error: { message: t } });
     }
-
     if (req.body.stream) {
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
@@ -137,7 +135,7 @@ app.post("/v1/chat/completions", async (req, res) => {
           if (!p) continue;
           try {
             const j = JSON.parse(p);
-            if (j.choices?.[0]?.delta?.content!= null) {
+            if (j.choices?.[0]?.delta?.content != null) {
               j.choices[0].delta.content = String(j.choices[0].delta.content);
             }
             if (j.model) j.model = j.model.replace("-fast", "");
