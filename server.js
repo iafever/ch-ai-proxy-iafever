@@ -32,69 +32,52 @@ app.get("/v1/models", (req,res)=>{
   ]});
 });
 
+// --- CHAT 終極修正 ---
 app.post("/v1/chat/completions", async (req,res)=>{
   try{
-    let { model, messages, stream } = req.body;
-    messages = normalizeMessages(messages);
-    
-    // granite 用新版 v1, flux 那些不用
-    const isChatModel = model.includes("granite") || model.includes("llama") || model.includes("gemma");
-    const cfUrl = isChatModel
-      ? `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/v1/chat/completions`
-      : `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
+    let model = req.body.model||MODELS.LLAMA;
+    // 強制禁用所有 fast
+    model = model.replace("-fast","").replace("granite-4.0-h-micro",MODELS.GRANITE);
+    if(!model.includes("granite") &&!model.includes("llama")) model = MODELS.LLAMA;
 
-    const body = isChatModel ? { model, messages, stream: !!stream } : { messages };
-
-    const cfRes = await fetch(cfUrl, {
-      method:"POST",
-      headers:{ Authorization:`Bearer ${CF_TOKEN}`, "Content-Type":"application/json" },
-      body: JSON.stringify(body)
+    const messages = (req.body.messages||[]).map(m=>{
+      let c = m.content; if(Array.isArray(c)) c=c.map(x=>typeof x==="string"?x:x.text||"").join("\n"); return {role:m.role,content:String(c||"")};
     });
 
-    if(!cfRes.ok){
-      const t = await cfRes.text();
-      console.error("CF ERROR:", t);
-      return res.status(cfRes.status).json({ error:{ message:"AiError: "+t, type:"api_error", code:"cloudflare_api_error" }});
-    }
+    const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/v1/chat/completions`;
+    const cfRes = await fetch(cfUrl,{
+      method:"POST",
+      headers:{Authorization:`Bearer ${CF_TOKEN}`,"Content-Type":"application/json"},
+      body: JSON.stringify({model, messages, stream:!!req.body.stream})
+    });
 
-    if(stream && isChatModel){
-      res.setHeader("Content-Type","text/event-stream");
-      res.setHeader("Cache-Control","no-cache");
-      const reader = cfRes.body.getReader();
+    if(!cfRes.ok){const t=await cfRes.text(); return res.status(cfRes.status).json({error:{message:t}});}
+
+    if(req.body.stream){
+      res.setHeader("Content-Type","text/event-stream"); res.setHeader("Cache-Control","no-cache");
+      const reader = cfRes.body.getReader(); const decoder=new TextDecoder(); let buf="";
       while(true){
-        const {done,value} = await reader.read();
-        if(done) break;
-        res.write(value);
-      }
-      res.end();
-    } else if(stream) {
-      // 舊版 /ai/run/ 的串流處理
-      res.setHeader("Content-Type","text/event-stream");
-      const reader = cfRes.body.getReader();
-      const decoder = new TextDecoder();
-      while(true){
-        const {done,value} = await reader.read();
-        if(done) break;
-        const chunk = decoder.decode(value,{stream:true});
-        for(const line of chunk.split("\n")){
-          if(line.startsWith("data:")){
-            try{
-              const j = JSON.parse(line.slice(5));
-              if(j.response) res.write(`data: ${JSON.stringify({choices:[{delta:{content:j.response}}]})}\n\n`);
-            }catch{ res.write(line+"\n\n"); }
-          }
+        const {done,value}=await reader.read(); if(done)break;
+        buf+=decoder.decode(value,{stream:true});
+        let lines=buf.split("\n"); buf=lines.pop()||"";
+        for(let line of lines){
+          if(!line.startsWith("data:")) continue;
+          let p=line.slice(5).trim(); if(p==="[DONE]"){res.write("data: [DONE]\n\n"); continue;}
+          if(!p) continue;
+          try{
+            let j=JSON.parse(p);
+            if(j.choices?.[0]?.delta && j.choices[0].delta.content!=null){
+              j.choices[0].delta.content = String(j.choices[0].delta.content);
+            }
+            res.write(`data: ${JSON.stringify(j)}\n\n`);
+          }catch{ /* 忽略 */ }
         }
       }
-      res.write("data: [DONE]\n\n"); res.end();
-    } else {
-      const text = await cfRes.text();
-      res.setHeader("Content-Type","application/json");
-      res.send(text);
+      res.end();
+    }else{
+      const t=await cfRes.text(); res.setHeader("Content-Type","application/json"); res.send(t);
     }
-  }catch(e){
-    console.error(e);
-    res.status(500).json({error:{message:e.message}});
-  }
+  }catch(e){ console.error(e); res.status(500).json({error:{message:e.message}});}
 });
 
 async function handleImage(req, res) {
