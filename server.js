@@ -2,8 +2,6 @@ import express from "express";
 import cors from "cors";
 
 const app = express();
-
-// JSON 先吃，multipart 我們後面自己吃
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
@@ -13,21 +11,22 @@ const CF_TOKEN = (process.env.CF_API_TOKEN || "").trim();
 const PORT = process.env.PORT || 10000;
 
 const MODELS = {
-  IMAGE: "@cf/black-forest-labs/flux-2-klein-4b",
-  LLAMA: "@cf/meta/llama-3.1-8b-instruct",
-  GRANITE: "@cf/ibm-granite/granite-4.0-h-micro"
+  QWEN: "@cf/qwen/qwen3-30b-a3b-fp8",
+  GRANITE: "@cf/ibm-granite/granite-4.0-h-micro",
+  IMAGE: "@cf/black-forest-labs/flux-2-klein-4b"
 };
 
 app.get("/ping", (req, res) => {
-  res.type("text/plain").send(`pong - ${MODELS.IMAGE} + ${MODELS.LLAMA} + ${MODELS.GRANITE} alive - ${new Date().toISOString()}`);
+  res.type("text/plain").send(`pong - ${MODELS.QWEN} + ${MODELS.GRANITE} + ${MODELS.IMAGE} alive - ${new Date().toISOString()}`);
 });
-app.get("/", (req, res) => res.type("text/plain").send("ready V13 no-multer fixed"));
+app.get("/health", (req, res) => res.json({ status: "ok", models: Object.values(MODELS), time: new Date().toISOString() }));
+app.get("/", (req, res) => res.type("text/plain").send(`ready V15 qwen+granite+flux`));
 app.get("/v1/models", (req, res) => res.json({
   object: "list",
   data: [
-    { id: MODELS.LLAMA, object: "model" },
-    { id: MODELS.GRANITE, object: "model" },
-    { id: MODELS.IMAGE, object: "model" }
+    { id: MODELS.QWEN, object: "model", owned_by: "qwen" },
+    { id: MODELS.GRANITE, object: "model", owned_by: "ibm" },
+    { id: MODELS.IMAGE, object: "model", owned_by: "black-forest" }
   ]
 }));
 
@@ -93,32 +92,44 @@ function parseMultipart(req) {
   });
 }
 
-// --- CHAT：強制修 content:1 數字問題 ---
 app.post("/v1/chat/completions", async (req, res) => {
   try {
-    let model = String(req.body.model || MODELS.LLAMA);
-    if (model.includes("fast")) model = MODELS.LLAMA;
-    if (model.includes("ibm/granite")) model = MODELS.GRANITE;
-    if (!model.includes("llama") && !model.includes("granite")) model = MODELS.LLAMA;
+    let model = String(req.body.model || MODELS.QWEN);
+    if (model.includes("llama") || model.includes("fast")) {
+      model = MODELS.QWEN;
+    }
+    if (model.includes("ibm/granite")) {
+      model = MODELS.GRANITE;
+    }
+    if (!model.includes("qwen") && !model.includes("granite")) {
+      model = MODELS.QWEN;
+    }
+
     const messages = (req.body.messages || []).map(m => {
       let c = m.content;
       if (Array.isArray(c)) c = c.map(x => typeof x === "string" ? x : (x.text || x.content || "")).join("\n");
       return { role: m.role || "user", content: String(c || "") };
     }).filter(m => m.content);
+
+    console.log(`CHAT model=${model} stream=${!!req.body.stream}`);
+
     const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/v1/chat/completions`;
     const cfRes = await fetch(cfUrl, {
       method: "POST",
       headers: { Authorization: `Bearer ${CF_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model, messages, stream: !!req.body.stream })
     });
+
     if (!cfRes.ok) {
       const t = await cfRes.text();
       console.error("CF ERROR", t);
       return res.status(cfRes.status).json({ error: { message: t } });
     }
+
     if (req.body.stream) {
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
       const reader = cfRes.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -138,6 +149,9 @@ app.post("/v1/chat/completions", async (req, res) => {
             if (j.choices?.[0]?.delta?.content != null) {
               j.choices[0].delta.content = String(j.choices[0].delta.content);
             }
+            if (j.choices?.[0]?.message?.content != null) {
+              j.choices[0].message.content = String(j.choices[0].message.content);
+            }
             if (j.model) j.model = j.model.replace("-fast", "");
             res.write(`data: ${JSON.stringify(j)}\n\n`);
           } catch {}
@@ -150,7 +164,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       res.send(txt);
     }
   } catch (e) {
-    console.error(e);
+    console.error("CHAT ERROR", e);
     if (!res.headersSent) res.status(500).json({ error: { message: e.message } });
   }
 });
