@@ -134,7 +134,7 @@ async function handleImage(req, res) {
     form.append("width", width);
     form.append("height", height);
     // dev 預設 25 步，klein 4 步
-    form.append("steps", String(req.body.steps || (isDev ? "8" : "4")));
+    form.append("steps", String(req.body.steps || (isDev ? "12" : "4")));
 
     if (imgInput) {
       const b64 = String(imgInput).includes(",")? String(imgInput).split(",")[1] : String(imgInput);
