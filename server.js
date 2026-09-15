@@ -13,7 +13,8 @@ const PORT = process.env.PORT || 10000;
 const MODELS = {
   QWEN: "@cf/qwen/qwen3-30b-a3b-fp8",
   GRANITE: "@cf/ibm-granite/granite-4.0-h-micro",
-  IMAGE: "@cf/black-forest-labs/flux-2-klein-4b"
+  IMAGE: "@cf/black-forest-labs/flux-2-klein-4b",
+  FLUX_DEV: "@cf/black-forest-labs/flux-2-dev"
 };
 
 app.get("/ping", (req, res) => {
@@ -26,7 +27,8 @@ app.get("/v1/models", (req, res) => res.json({
   data: [
     { id: MODELS.QWEN, object: "model", owned_by: "qwen" },
     { id: MODELS.GRANITE, object: "model", owned_by: "ibm" },
-    { id: MODELS.IMAGE, object: "model", owned_by: "black-forest" }
+    { id: MODELS.IMAGE, object: "model", owned_by: "black-forest" },
+    { id: MODELS.FLUX_DEV, object: "model", owned_by: "black-forest" }
   ]
 }));
 
@@ -109,40 +111,51 @@ app.post("/v1/chat/completions", async (req, res) => {
 
 async function handleImage(req, res) {
   try {
-    const model = "@cf/black-forest-labs/flux-2-klein-4b";
+    // 支援 flux-2-dev + flux-2-klein-4b，透過 body.model 選擇，其他不動
+    let requestedModel = String(req.body.model || "");
+    let model = MODELS.IMAGE; // 預設 klein-4b
+    if (requestedModel.includes("flux-2-dev") || requestedModel.includes("flux2-dev")) {
+      model = MODELS.FLUX_DEV;
+    } else if (requestedModel.includes("flux-2-klein-4b") || requestedModel.includes("klein")) {
+      model = MODELS.IMAGE;
+    }
+
     const prompt = String(req.body.prompt || "full body photo of the same person, same face");
     const size = (req.body.size || "910x512").split("x");
     const width = String(parseInt(size[0]) || 910);
     const height = String(parseInt(size[1]) || 512);
     const imgInput = req.body.image || req.body.image_b64;
 
+    // flux-2-dev 和 klein-4b 都需要 multipart body
+    const isDev = model === MODELS.FLUX_DEV;
+
     const form = new FormData();
     form.append("prompt", prompt);
     form.append("width", width);
     form.append("height", height);
-    form.append("steps", "4");
+    // dev 預設 25 步，klein 4 步
+    form.append("steps", String(req.body.steps || (isDev ? "25" : "4")));
 
     if (imgInput) {
       const b64 = String(imgInput).includes(",")? String(imgInput).split(",")[1] : String(imgInput);
       const buffer = Buffer.from(b64, "base64");
-      // 關鍵：檔名要是 input.jpg，type 要 image/jpeg
       form.append("image", new Blob([buffer], {type:"image/jpeg"}), "input.jpg");
-      form.append("strength", String(req.body.strength || 0.5));
-      console.log("KLEIN IMG2IMG MULTIPART, size", buffer.length);
+      form.append("strength", String(req.body.strength || (isDev ? "0.6" : "0.5")));
+      console.log(`${isDev ? "DEV" : "KLEIN"} IMG2IMG MULTIPART model=${model} size`, buffer.length);
     } else {
-      console.log("KLEIN TEXT2IMG MULTIPART");
+      console.log(`${isDev ? "DEV" : "KLEIN"} TEXT2IMG MULTIPART model=${model}`);
     }
 
     const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${model}`;
     const cfRes = await fetch(cfUrl, {
       method: "POST",
-      headers: { Authorization: `Bearer ${CF_TOKEN}` }, // multipart 不要自己加 Content-Type
+      headers: { Authorization: `Bearer ${CF_TOKEN}` },
       body: form
     });
 
     const text = await cfRes.text();
-    console.log("CF STATUS", cfRes.status);
-    if (!cfRes.ok) { console.error("CF KLEIN ERROR:", text); return res.status(cfRes.status).json({ error:{message:text} }); }
+    console.log("CF STATUS", cfRes.status, "model", model);
+    if (!cfRes.ok) { console.error(`CF ${model} ERROR:`, text); return res.status(cfRes.status).json({ error:{message:text} }); }
 
     const data = JSON.parse(text);
     res.json({ created: Date.now(), data:[{ b64_json: data.result?.image || data.result }] });
